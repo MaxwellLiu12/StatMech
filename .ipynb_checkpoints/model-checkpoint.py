@@ -241,10 +241,12 @@ class Graph(object):
         depths = torch.zeros(self.max_node + 1, 1, dtype=torch.int32)
         depth_determiner = torch.ones(self.max_node + 1, 1, dtype=torch.int32)
         adj_matrix = self.remove_self_loops().get_adj_matrix()
+        print("ADJ:" adj_matrix)
         prev_parents = self.max_node + 1
         num_parents = self.max_node + 1
         while num_parents:
             depth_determiner = (adj_matrix.mm(depth_determiner) > 0).int()
+            print("DEPTH:",depth_determiner)
             num_parents = sum(depth_determiner)
             if num_parents == prev_parents:
                 return None
@@ -681,7 +683,7 @@ class GraphConv(nn.Module):
             self.forwarding_graphs.append(self.graph.select_connections(*depth))
 
     def reset_parameters(self):
-        bound = 1 / (self.lattice_sites * self.in_features)
+        bound = 1 / math.sqrt(self.lattice_sites * self.in_features)
         nn.init.uniform_(self.weight, -bound, bound)
         if self.bias is not None:
             fan_in = self.in_features
@@ -774,17 +776,17 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
         # assuming global symmetry, node 0 is always sampled uniformly
         cache[0][..., 0, :] = sampler(cache[0][..., 0, :])
         # start autoregressive sampling
-        for j in range(1, self.max_depth): # iterate through nodes 1:all
+        for j in range(1, self.max_depth + 1): # iterate through nodes 1:all
             for l, layer in enumerate(self.layers):
                 if isinstance(layer, GraphConv): # for graph convolution layers
                     if l==0: # first layer should forward from previous node
-                        cache[l + 1] += layer(cache[l], j - 1)
+                        cache[l + 1] += layer(cache[l], j - 1)#possibly change to not be in place operation
                     else: # remaining layers forward from this node
                         cache[l + 1] += layer(cache[l], j)
                 else: # for other layers, only update node j (other nodes not ready yet)
                     src = layer(cache[l][..., [j], :])
                     index = torch.tensor(j).view([1]*src.dim()).expand(src.size())
-                    cache[l + 1] = cache[l + 1].scatter(-2, index, src)
+                    cache[l + 1] = cache[l + 1].scatter(-2, index, src)#scatter incorrect
             # the last cache hosts the logit, sample from it 
             cache[0][..., j, :] = sampler(cache[-1][..., j, :])
         return cache # cache[0] hosts the sample

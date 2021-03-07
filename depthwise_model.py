@@ -231,7 +231,7 @@ class Graph(object):
         return Graph(connection_graph, encode = True)
     
     def get_adj_matrix(self):
-        sparse_graph = self.sparse_graph()
+        sparse_graph = self.inverse_connections().sparse_graph()
         adj_size = self.max_node + 1
         return torch.sparse.FloatTensor(sparse_graph[0], torch.ones(self.num_edges),
                                         torch.Size([adj_size, adj_size])).to_dense().int()
@@ -664,7 +664,7 @@ class GraphConv(nn.Module):
             graph = graph.remove_self_loops()#removes any self_loops according to boolean
         self.graph = graph.expand_features(self.in_features, self.out_features)#expands the graph features
         self.graph = self.graph.inverse_connections()
-        self.depth_assignment = graph.get_depth_assignment()
+        self.depth_assignment = self.graph.get_depth_assignment()#change to variable in graph class
         self.forwarding_graphs_init()
         edge_types = self.graph.edge_types
         if edge_types != self.edge_types:
@@ -773,13 +773,13 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
         for layer in self.layers:
             if isinstance(layer, GraphConv): # for graph convolution layers
                 features = layer.out_features # features get updated
+                print("Layer Depth: ", layer.depth_assignment)
                 depths = torch.LongTensor(layer.depth_assignment) # depths get updated
                 print("Depths: ", depths)
             cache.append(torch.zeros(self.nodes * features, sample_size))
             depth_assignments.append(depths)
         # cache established. start by sampling depth 0.
         # assuming global symmetry, depth 0 is always sampled uniformly
-        print("Depth_assignments", depth_assignments)
         cache[0][depth_assignments[0][0]] = sampler(cache[0][depth_assignments[0][0]])
         # start autoregressive sampling
         for j in range(1, self.max_depth + 1): # iterate through depths 1:all
@@ -790,14 +790,14 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
                     else: # remaining layers forward from this node
                         cache[l + 1] += layer(cache[l], j)
                 else: # for other layers, only update depth j (other nodes not ready yet)
-                    src = layer(cache[l][depth_assignments[j]])
+                    src = layer(cache[l][depth_assignments[l][j]])
                     index = depth_assignments[l][j].unsqueeze(1).expand(src.size())#POTENTIAL ISSUE
                     print("src size: ", src.size())
                     print("index size: ", index.size())
                     print("Cache size: ", cache[l+1].size())
                     cache[l + 1] = cache[l + 1].scatter(0, index, src)
             # the last cache hosts the logit, sample from it 
-            cache[0][depth_assignments[j]] = sampler(cache[-1][depth_assignments[j]])
+            cache[0][depth_assignments[0][j]] = sampler(cache[-1][depth_assignments[-1][j]])
         return cache # cache[0] hosts the sample
     
     def sample(self, sample_size=1):

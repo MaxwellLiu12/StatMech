@@ -770,13 +770,16 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
             sampler = self.sampler
         # create a list of tensors to cache layer-wise outputs
         cache = [torch.zeros(sample_size, self.nodes, self.features[0])]
+        depth_assignments = [self.layers[0].depth_assignment]
         for layer in self.layers:
             if isinstance(layer, GraphConv): # for graph convolution layers
                 features = layer.out_features # features get updated
+                depths = torch.LongTensor(layer.depth_assignment) # depths get updated
             cache.append(torch.zeros(sample_size, self.nodes, features))
+            depth_assignments.append(depths)
         # cache established. start by sampling node 0.
         # assuming global symmetry, node 0 is always sampled uniformly
-        cache[0][..., 0, :] = sampler(cache[0][..., 0, :])
+        cache[0][..., depth_assignments[0][0], :] = sampler(cache[0][..., depth_assignments[0][0], :])
         # start autoregressive sampling
         for j in range(1, self.max_depth + 1): # iterate through nodes 1:all
             for l, layer in enumerate(self.layers):
@@ -786,11 +789,11 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
                     else: # remaining layers forward from this node
                         cache[l + 1] += layer(cache[l], j)
                 else: # for other layers, only update node j (other nodes not ready yet)
-                    src = layer(cache[l][..., [j], :])
-                    index = torch.tensor(j).view([1]*src.dim()).expand(src.size())
+                    src = layer(cache[l][..., depth_assignments[l][j], :])
+                    index = depth_assignments[l][j].view([1, src.size()[1], 1]).expand(src.size())
                     cache[l + 1] = cache[l + 1].scatter(-2, index, src)#scatter incorrect
             # the last cache hosts the logit, sample from it 
-            cache[0][..., j, :] = sampler(cache[-1][..., j, :])
+            cache[0][..., depth_assignments[0][j], :] = sampler(cache[-1][..., depth_assignments[-1][j], :])
         return cache # cache[0] hosts the sample
     
     def sample(self, sample_size=1):
