@@ -74,7 +74,7 @@ class Lattice(object):
     def graph_init(self, max_distance):
         graph = self.causal_graph(max_distance)
         graph = graph.to_sparse()
-        self.graph = Graph((graph.indices(), graph.values()))
+        self.graph = ExpandGraph((graph.indices(), graph.values()))
         self.max_depth = self.graph.get_depths().max()
         
     def _left_right_tree_edges(self, n):
@@ -324,12 +324,9 @@ class Graph(object):
     
 class ExpandGraph(Graph):
     
-    def __init__(self, connection_graph, encode = False, self_loops = None):
+    def __init__(self, connection_graph, encode = False, feats = (1, 1)):
         super().__init__(connection_graph, encode)
-        if self_loops == None:
-            self.self_loops = torch.arange(self.max_node + 1).repeat([self.max_node, 2])
-        else:
-            self.self_loops = self_loops
+        self.feats = feats
         
     def expand_features(self, in_expansion=1, out_expansion=1):
         #expansion of the in features
@@ -350,28 +347,13 @@ class ExpandGraph(Graph):
         weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
         weights = weights.flatten()
         connection_graph = (torch.stack((in_features, out_features)), weights)
-        self_loops = self._expand_self_loops()
-        return ExpandGraph(connection_graph, encode = True, self_loops = self_loops)
-    
-    def _expand_self_loops(self, in_expansion=1, out_expansion=1):
-        #expansion of the in features
-        out_features = self.self_loops[1].repeat(in_expansion)
-        in_features = self.self_loops[0] * in_expansion
-        in_features = in_features + torch.arange(0, in_expansion).unsqueeze(1)
-        in_features = in_features.flatten()
-    
-        #expansion of the out features
-        in_features = in_features.repeat(out_expansion)
-        out_features = out_features * out_expansion
-        out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
-        out_features = out_features.flatten()
-        return torch.stack((in_features, out_features))
+        return ExpandGraph(connection_graph, encode = True, feats = (in_expansion, out_expansion))
     
     def remove_self_loops(self):
-        in_match = self.connection_graph[0][0]  self.self_loops[0]
-        
-        return
-    
+        bound = self.connection_graph[0][0] // self.feats[0]
+        is_self_loop = torch.le(bound * self.feats[1], self.connection_graph[0][1])
+        is_self_loop = (is_self_loop) & (torch.lt(self.connection_graph[0][1], (bound + 1) * self.feats[1]))
+        return ExpandGraph(self.take_connections(~is_self_loop), feats = self.feats)
 
 class Group(object):
     """Represent a group, providing multiplication and inverse operation.

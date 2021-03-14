@@ -74,7 +74,7 @@ class Lattice(object):
     def graph_init(self, max_distance):
         graph = self.causal_graph(max_distance)
         graph = graph.to_sparse()
-        self.graph = Graph((graph.indices(), graph.values()))
+        self.graph = ExpandGraph((graph.indices(), graph.values()))
         self.max_depth = self.graph.get_depths().max()
         
     def _left_right_tree_edges(self, n):
@@ -224,14 +224,14 @@ class Graph(object):
         out_features = out_features * out_expansion
         out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
         out_features = out_features.flatten()
-        weights = weights * in_expansion
+        weights = weights * out_expansion
         weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
         weights = weights.flatten()
         connection_graph = (torch.stack((in_features, out_features)), weights)
         return Graph(connection_graph, encode = True)
     
     def get_adj_matrix(self):
-        sparse_graph = self.sparse_graph()
+        sparse_graph = self.inverse_connections().sparse_graph()
         adj_size = self.max_node + 1
         return torch.sparse.FloatTensor(sparse_graph[0], torch.ones(self.num_edges),
                                         torch.Size([adj_size, adj_size])).to_dense().int()
@@ -317,6 +317,63 @@ class Graph(object):
     def __repr__(self):
         """representation of connection_graph sorted by connection_type"""
         return "{0}\n{1}".format(self.connection_graph[0], self.connection_graph[1])
+    
+class ExpandGraph(Graph):
+    
+    def __init__(self, connection_graph, encode = False, feats = (1, 1), base_depths = None):
+        super().__init__(connection_graph, encode)
+        self.feats = feats
+        self.base_depths = base_depths
+        
+        if base_depths is None:
+            self.base_depths = Graph(connection_graph).get_depths()
+            
+        self.init_node_mappings()
+        
+    def init_node_mappings(self):
+        node_range = lambda node: range(node * self.feats[0], (node + 1) * self.feats[0])
+        self.node_mappings = [list(node_range(node)) for node in range(max(self.base_depths) + 1)]
+        
+    def expand_features(self, in_expansion=1, out_expansion=1):
+        #expansion of the in features
+        out_features = self.connection_graph[0][1].repeat(in_expansion)
+        in_features = self.connection_graph[0][0] * in_expansion
+        in_features = in_features + torch.arange(0, in_expansion).unsqueeze(1)
+        in_features = in_features.flatten()
+        weights = self.connection_graph[1] * in_expansion
+        weights = weights + torch.arange(0, in_expansion).unsqueeze(1)
+        weights = weights.flatten()
+    
+        #expansion of the out features
+        in_features = in_features.repeat(out_expansion)
+        out_features = out_features * out_expansion
+        out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
+        out_features = out_features.flatten()
+        weights = weights * out_expansion
+        weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
+        weights = weights.flatten()
+        connection_graph = (torch.stack((in_features, out_features)), weights)
+        return ExpandGraph(connection_graph, True, (in_expansion, out_expansion), self.base_depths)
+    
+    def inverse_connections(self):
+        """inverts directionality of edges in the graph"""
+        inverse_connection_graph = (self.connection_graph[0].roll(1, 0) , self.connection_graph[1])
+        return ExpandGraph(inverse_connection_graph, False, self.feats, self.base_depths)
+    
+    def get_depth_assignment(self):
+        """creates a list grouping the different depths of each site"""
+        if self.base_depths is None:
+            return None
+        depth_assignment = [[] for _ in range(max(self.base_depths) + 1)]
+        for i, depth in enumerate(self.base_depths):
+            depth_assignment[depth].extend(self.node_mappings[i])
+        return depth_assignment
+    
+    def remove_self_loops(self):
+        bound = self.connection_graph[0][0] // self.feats[0]
+        is_self_loop = torch.le(bound * self.feats[1], self.connection_graph[0][1])
+        is_self_loop = (is_self_loop) & (torch.lt(self.connection_graph[0][1], (bound + 1) * self.feats[1]))
+        return ExpandGraph(self.take_connections(~is_self_loop), False, self.feats, self.base_depths)
 
 class Group(object):
     """Represent a group, providing multiplication and inverse operation.
@@ -664,7 +721,7 @@ class GraphConv(nn.Module):
             graph = graph.remove_self_loops()#removes any self_loops according to boolean
         self.graph = graph.expand_features(self.in_features, self.out_features)#expands the graph features
         self.graph = self.graph.inverse_connections()
-        self.depth_assignment = graph.get_depth_assignment()
+        self.depth_assignment = self.graph.get_depth_assignment()#change to variable in graph class
         self.forwarding_graphs_init()
         edge_types = self.graph.edge_types
         if edge_types != self.edge_types:
@@ -676,6 +733,7 @@ class GraphConv(nn.Module):
         return self
     
     def forwarding_graphs_init(self):
+        print(self.in_features, self.out_features)
         self.forwarding_graphs = []
         for depth in self.depth_assignment:
             self.forwarding_graphs.append(self.graph.select_connections(*depth))
@@ -773,13 +831,13 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
         for layer in self.layers:
             if isinstance(layer, GraphConv): # for graph convolution layers
                 features = layer.out_features # features get updated
+                print("Layer Depth: ", layer.depth_assignment)
                 depths = torch.LongTensor(layer.depth_assignment) # depths get updated
                 print("Depths: ", depths)
             cache.append(torch.zeros(self.nodes * features, sample_size))
             depth_assignments.append(depths)
         # cache established. start by sampling depth 0.
         # assuming global symmetry, depth 0 is always sampled uniformly
-        print("Depth_assignments", depth_assignments)
         cache[0][depth_assignments[0][0]] = sampler(cache[0][depth_assignments[0][0]])
         # start autoregressive sampling
         for j in range(1, self.max_depth + 1): # iterate through depths 1:all
@@ -790,14 +848,14 @@ class AutoregressiveModel(nn.Module, dist.Distribution):
                     else: # remaining layers forward from this node
                         cache[l + 1] += layer(cache[l], j)
                 else: # for other layers, only update depth j (other nodes not ready yet)
-                    src = layer(cache[l][depth_assignments[j]])
+                    src = layer(cache[l][depth_assignments[l][j]])
                     index = depth_assignments[l][j].unsqueeze(1).expand(src.size())#POTENTIAL ISSUE
                     print("src size: ", src.size())
                     print("index size: ", index.size())
                     print("Cache size: ", cache[l+1].size())
                     cache[l + 1] = cache[l + 1].scatter(0, index, src)
             # the last cache hosts the logit, sample from it 
-            cache[0][depth_assignments[j]] = sampler(cache[-1][depth_assignments[j]])
+            cache[0][depth_assignments[0][j]] = sampler(cache[-1][depth_assignments[-1][j]])
         return cache # cache[0] hosts the sample
     
     def sample(self, sample_size=1):
