@@ -324,10 +324,13 @@ class Graph(object):
     
 class ExpandGraph(Graph):
     
-    def __init__(self, connection_graph, encode = False, feats = (1,1)):
+    def __init__(self, connection_graph, encode = False, self_loops = None):
         super().__init__(connection_graph, encode)
-        self.feats = feats
-    
+        if self_loops == None:
+            self.self_loops = torch.arange(self.max_node + 1).repeat([self.max_node, 2])
+        else:
+            self.self_loops = self_loops
+        
     def expand_features(self, in_expansion=1, out_expansion=1):
         #expansion of the in features
         out_features = self.connection_graph[0][1].repeat(in_expansion)
@@ -343,14 +346,31 @@ class ExpandGraph(Graph):
         out_features = out_features * out_expansion
         out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
         out_features = out_features.flatten()
-        weights = weights * in_expansion
+        weights = weights * out_expansion
         weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
         weights = weights.flatten()
         connection_graph = (torch.stack((in_features, out_features)), weights)
-        return Graph(connection_graph, encode = True)
+        self_loops = self._expand_self_loops()
+        return ExpandGraph(connection_graph, encode = True, self_loops = self_loops)
+    
+    def _expand_self_loops(self, in_expansion=1, out_expansion=1):
+        #expansion of the in features
+        out_features = self.self_loops[1].repeat(in_expansion)
+        in_features = self.self_loops[0] * in_expansion
+        in_features = in_features + torch.arange(0, in_expansion).unsqueeze(1)
+        in_features = in_features.flatten()
+    
+        #expansion of the out features
+        in_features = in_features.repeat(out_expansion)
+        out_features = out_features * out_expansion
+        out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
+        out_features = out_features.flatten()
+        return torch.stack((in_features, out_features))
     
     def remove_self_loops(self):
-        pass
+        in_match = self.connection_graph[0][0]  self.self_loops[0]
+        
+        return
     
 
 class Group(object):
