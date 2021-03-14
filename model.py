@@ -224,7 +224,7 @@ class Graph(object):
         out_features = out_features * out_expansion
         out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
         out_features = out_features.flatten()
-        weights = weights * in_expansion
+        weights = weights * out_expansion
         weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
         weights = weights.flatten()
         connection_graph = (torch.stack((in_features, out_features)), weights)
@@ -321,6 +321,37 @@ class Graph(object):
     def __repr__(self):
         """representation of connection_graph sorted by connection_type"""
         return "{0}\n{1}".format(self.connection_graph[0], self.connection_graph[1])
+    
+class ExpandGraph(Graph):
+    
+    def __init__(self, connection_graph, encode = False, feats = (1,1)):
+        super().__init__(connection_graph, encode)
+        self.feats = feats
+    
+    def expand_features(self, in_expansion=1, out_expansion=1):
+        #expansion of the in features
+        out_features = self.connection_graph[0][1].repeat(in_expansion)
+        in_features = self.connection_graph[0][0] * in_expansion
+        in_features = in_features + torch.arange(0, in_expansion).unsqueeze(1)
+        in_features = in_features.flatten()
+        weights = self.connection_graph[1] * in_expansion
+        weights = weights + torch.arange(0, in_expansion).unsqueeze(1)
+        weights = weights.flatten()
+    
+        #expansion of the out features
+        in_features = in_features.repeat(out_expansion)
+        out_features = out_features * out_expansion
+        out_features = out_features + torch.arange(0, out_expansion).unsqueeze(1)
+        out_features = out_features.flatten()
+        weights = weights * in_expansion
+        weights = weights + torch.arange(0, out_expansion).unsqueeze(1)
+        weights = weights.flatten()
+        connection_graph = (torch.stack((in_features, out_features)), weights)
+        return Graph(connection_graph, encode = True)
+    
+    def remove_self_loops(self):
+        pass
+    
 
 class Group(object):
     """Represent a group, providing multiplication and inverse operation.
